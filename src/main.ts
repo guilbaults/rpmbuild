@@ -4,6 +4,7 @@ const exec = require('@actions/exec');
 const io = require('@actions/io');
 const cp = require('child_process');
 const fs = require('fs');
+const path = require('path');
 
 async function run() {
   try {
@@ -18,10 +19,15 @@ async function run() {
 
     // get inputs from workflow
     // specFile name
-    const specFile = core.getInput('spec_file');
+    const configPath = core.getInput('spec_file'); // user input, eg: `foo.spec' or `rpm/foo.spec'
+    const basename = path.basename(configPath); // always just `foo.spec`
+    const specFile = {
+      srcFullPath: `/github/workspace/${configPath}`,
+      destFullPath: `/github/home/rpmbuild/SPECS/${basename}`,
+    };
 
     // Read spec file and get values 
-    var data = fs.readFileSync(specFile, 'utf8');
+    var data = fs.readFileSync(specFile.srcFullPath, 'utf8');
     let name = '';       
     let version = '';
 
@@ -40,31 +46,19 @@ async function run() {
     // setup rpm tree
     await exec.exec('rpmdev-setuptree');
 
-    // Copy spec file from path specFile to /root/rpmbuild/SPECS/
-    await exec.exec(`cp /github/workspace/${specFile} /github/home/rpmbuild/SPECS/`);
+    // Copy spec file from path specFile to /github/home/rpmbuild/SPECS/
+    await exec.exec(`cp ${specFile.srcFullPath} ${specFile.destFullPath}`);
 
-    // Dowload tar.gz file of source code,  Reference : https://developer.github.com/v3/repos/contents/#get-archive-link
-    await exec.exec(`curl -L --output tmp.tar.gz https://api.github.com/repos/${owner}/${repo}/tarball/${ref}`)
-
-    // create directory to match source file - %{name}-{version}.tar.gz of spec file
-    await exec.exec(`mkdir ${name}-${version}`);
-
-    // Extract source code 
-    await exec.exec(`tar xvf tmp.tar.gz -C ${name}-${version} --strip-components 1`);
-
-    // Create Source tar.gz file 
-    await exec.exec(`tar -czvf ${name}-${version}.tar.gz ${name}-${version}`);
-
-    // // list files in current directory /github/workspace/
-    // await exec.exec('ls -la ');
-
-    // Copy tar.gz file to source path
-    await exec.exec(`cp ${name}-${version}.tar.gz /github/home/rpmbuild/SOURCES/`);
+    // Make the code in /github/workspace/ into a tar.gz, located in /github/home/rpmbuild/SOURCES/
+    const oldGitDir = process.env.GIT_DIR;
+    process.env.GIT_DIR = '/github/workspace/.git';
+    await exec.exec(`git archive --output=/github/home/rpmbuild/SOURCES/${name}-${version}.tar.gz --prefix=${name}-${version}/ HEAD`);
+    process.env.GIT_DIR = oldGitDir;
 
     // Execute rpmbuild , -ba generates both RPMS and SPRMS
     try {
       await exec.exec(
-        `rpmbuild -ba /github/home/rpmbuild/SPECS/${specFile}`
+        `rpmbuild -ba ${specFile.destFullPath}`
       );
     } catch (err) {
       core.setFailed(`action failed with error: ${err}`);
